@@ -1,0 +1,179 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id         String     @id @default(cuid())
+  name       String
+  email      String     @unique
+  properties Property[]
+  buildings  Building[]
+  units      Unit[]
+  tenants    Tenant[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+}
+
+model Property {
+  id         String   @id @default(cuid())
+  name       String
+  type       String
+  address    String
+  city       String
+  postalCode String?
+  ownerId    String
+  owner      User     @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  units      Unit[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model Building {
+  id         String   @id @default(cuid())
+  name       String
+  address    String
+  city       String
+  postalCode String?
+  ownerId    String
+  owner      User     @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  units      Unit[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model Unit {
+  id          String  @id @default(cuid())
+  reference   String
+  type        String  @default("APARTMENT")
+  floor       String?
+  address     String?
+  city        String?
+  postalCode  String?
+  monthlyRent Int
+  isActive    Boolean @default(true)
+
+  ownerId String
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+
+  propertyId String?
+  property   Property? @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+
+  buildingId String?
+  building   Building? @relation(fields: [buildingId], references: [id], onDelete: Restrict)
+
+  leases    Lease[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([buildingId, reference])
+  @@unique([propertyId, reference])
+  @@index([ownerId])
+  @@index([propertyId])
+  @@index([buildingId])
+}
+
+model Tenant {
+  id        String  @id @default(cuid())
+  firstName String
+  lastName  String
+  email     String?
+  phone     String?
+
+  ownerId String
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+
+  leases    Lease[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  payments  Payment[]
+
+  @@index([ownerId])
+}
+
+model TenantCredit {
+  id        String   @id @default(cuid())
+  tenantId  String
+  amount    Int
+  remaining Int
+  source    String   @default("PAYMENT")
+  paymentId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([paymentId])
+}
+
+model Lease {
+  id            String       @id @default(cuid())
+  startDate     DateTime
+  endDate       DateTime?
+  monthlyRent   Int
+  dueDayOfMonth Int          @default(1)
+  status        String       @default("ACTIVE")
+  unitId        String
+  tenantId      String
+  unit          Unit         @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  tenant        Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  charges       RentCharge[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([unitId, status])
+  @@index([tenantId])
+}
+
+model RentCharge {
+  id          String              @id @default(cuid())
+  period      String
+  amount      Int
+  dueDate     DateTime
+  leaseId     String
+  lease       Lease               @relation(fields: [leaseId], references: [id], onDelete: Restrict)
+  allocations PaymentAllocation[]
+  createdAt   DateTime            @default(now())
+
+  @@unique([leaseId, period])
+  @@index([dueDate])
+}
+
+model Payment {
+  id          String   @id @default(cuid())
+  amount      Int
+  paymentDate DateTime @default(now())
+  method      String?
+  reference   String?
+  note        String?
+
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  allocations PaymentAllocation[]
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, paymentDate])
+}
+
+model PaymentAllocation {
+  id           String     @id @default(cuid())
+  amount       Int
+  paymentId    String
+  rentChargeId String
+  payment      Payment    @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  rentCharge   RentCharge @relation(fields: [rentChargeId], references: [id], onDelete: Restrict)
+  createdAt    DateTime   @default(now())
+
+  @@unique([paymentId, rentChargeId])
+  @@index([rentChargeId])
+}

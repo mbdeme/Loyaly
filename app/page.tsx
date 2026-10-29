@@ -1,68 +1,356 @@
-import Image from "next/image";
 
-export default function Home() {
+import { getCurrentUser } from "@/lib/supabase/auth";
+import { prisma } from "@/lib/prisma";
+import Link from "next/link";
+import Image from "next/image";
+import LogoutButton from "@/app/components/LogoutButton";
+
+const menu = [
+  { label: "Vue d’ensemble", href: "/", icon: "⌂" },
+  { label: "Biens", href: "/biens", icon: "▦" },
+  { label: "Logements", href: "/logements", icon: "⌂" },
+  { label: "Locataires", href: "/locataires", icon: "♙" },
+  { label: "Baux", href: "/baux", icon: "▤" },
+  { label: "Paiements", href: "/paiements", icon: "€" },
+  { label: "Impayés", href: "/impayes", icon: "!" },
+];
+
+function euros(centimes: number) {
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: "EUR",
+  }).format(centimes / 100);
+}
+
+function nomPeriode(date: Date) {
+  return date.toLocaleDateString("fr-FR", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+export default async function Home() {
+  const user = await getCurrentUser();
+
+  const maintenant = new Date();
+  const debutMois = new Date(
+    maintenant.getFullYear(),
+    maintenant.getMonth(),
+    1
+  );
+  const debutMoisSuivant = new Date(
+    maintenant.getFullYear(),
+    maintenant.getMonth() + 1,
+    1
+  );
+
+  const [nombreLogements, echeances] = await Promise.all([
+    prisma.unit.count({
+      where: { ownerId: user.id },
+    }),
+    prisma.rentCharge.findMany({
+      where: {
+        lease: {
+          unit: { ownerId: user.id },
+          tenant: { ownerId: user.id },
+        },
+      },
+      include: {
+        allocations: {
+          select: { amount: true },
+        },
+        lease: {
+          include: {
+            tenant: {
+              select: {
+                id: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+            unit: {
+              select: {
+                id: true,
+                reference: true,
+                city: true,
+                property: {
+                  select: { name: true },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: { dueDate: "asc" },
+    }),
+  ]);
+
+  const echeancesCalculees = echeances.map((echeance) => {
+    const montantPaye = echeance.allocations.reduce(
+      (total, allocation) => total + allocation.amount,
+      0
+    );
+
+    return {
+      ...echeance,
+      montantPaye,
+      resteDu: Math.max(0, echeance.amount - montantPaye),
+    };
+  });
+
+  // Les loyers attendus correspondent aux échéances du mois courant.
+  const echeancesDuMois = echeancesCalculees.filter(
+    (echeance) =>
+      echeance.dueDate >= debutMois &&
+      echeance.dueDate < debutMoisSuivant
+  );
+
+  const loyersAttendus = echeancesDuMois.reduce(
+    (total, echeance) => total + echeance.amount,
+    0
+  );
+
+  const loyersEncaisses = echeancesDuMois.reduce(
+    (total, echeance) => total + echeance.montantPaye,
+    0
+  );
+
+  // Seules les échéances déjà arrivées à échéance sont comptées ici.
+  const echeancesEnRetard = echeancesCalculees.filter(
+    (echeance) =>
+      echeance.dueDate <= maintenant && echeance.resteDu > 0
+  );
+
+  const impayesCumules = echeancesEnRetard.reduce(
+    (total, echeance) => total + echeance.resteDu,
+    0
+  );
+
+  // Regroupement des dettes par locataire et logement.
+  const groupesImpayes = new Map<
+    string,
+    {
+      tenantId: string;
+      locataire: string;
+      logement: string;
+      dette: number;
+      periodes: Set<string>;
+      plusAncienneEcheance: Date;
+    }
+  >();
+
+  for (const echeance of echeancesEnRetard) {
+    const tenant = echeance.lease.tenant;
+    const unit = echeance.lease.unit;
+    const cle = `${tenant.id}-${unit.id}`;
+
+    let groupe = groupesImpayes.get(cle);
+
+    if (!groupe) {
+      groupe = {
+        tenantId: tenant.id,
+        locataire: `${tenant.firstName} ${tenant.lastName}`,
+        logement: `${unit.reference}${unit.city ? ` — ${unit.city}` : ""}`,
+        dette: 0,
+        periodes: new Set<string>(),
+        plusAncienneEcheance: echeance.dueDate,
+      };
+
+      groupesImpayes.set(cle, groupe);
+    }
+
+    groupe.dette += echeance.resteDu;
+    groupe.periodes.add(echeance.period);
+
+    if (echeance.dueDate < groupe.plusAncienneEcheance) {
+      groupe.plusAncienneEcheance = echeance.dueDate;
+    }
+  }
+
+  const lignesImpayes = Array.from(groupesImpayes.values()).sort(
+    (a, b) => b.dette - a.dette
+  );
+
+  const pourcentageEncaisse =
+    loyersAttendus > 0
+      ? Math.round((loyersEncaisses / loyersAttendus) * 1000) / 10
+      : 0;
+
+  const stats = [
+    {
+      label: "Loyers attendus",
+      value: euros(loyersAttendus),
+      note: nomPeriode(maintenant),
+    },
+    {
+      label: "Loyers encaissés",
+      value: euros(loyersEncaisses),
+      note: `${pourcentageEncaisse.toLocaleString("fr-FR")} % encaissés`,
+    },
+    {
+      label: "Impayés cumulés",
+      value: euros(impayesCumules),
+      note: "Échéances arrivées à échéance",
+      alert: impayesCumules > 0,
+    },
+    {
+      label: "Logements",
+      value: String(nombreLogements),
+      note: "Dans votre patrimoine",
+    },
+  ];
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <div className="min-h-screen bg-slate-50 text-slate-900 md:flex">
+      <aside className="w-full border-r border-slate-200 bg-white p-5 md:min-h-screen md:w-64">
+        <Link href="/" className="mb-8 flex items-center gap-3">
+          <Image
+            src="/logo-localy.png"
+            alt="Logo Localy"
+            width={48}
+            height={48}
+            priority
+            className="h-12 w-12 rounded-xl object-contain"
+          />
+          <span>
+            <span className="block text-xl font-bold">Localy</span>
+            <span className="text-xs text-slate-500">Gestion locative</span>
+          </span>
+        </Link>
+
+        <nav className="flex flex-wrap gap-2 md:flex-col">
+          {menu.map((item, index) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`rounded-lg px-3 py-2.5 text-sm ${
+                index === 0
+                  ? "bg-emerald-50 font-semibold text-emerald-900"
+                  : "text-slate-600 hover:bg-slate-50"
+              }`}
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+              <span className="mr-3">{item.icon}</span>
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+
+        <div className="mt-10 rounded-xl bg-slate-50 p-4">
+          <p className="text-sm font-semibold">Votre patrimoine</p>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            Gérez vos logements et suivez vos loyers au même endroit.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+      </aside>
+
+      <main className="min-w-0 flex-1 p-5 md:p-8">
+        <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-sm text-slate-500">Gestion locative</p>
+            <h1 className="mt-1 text-2xl font-bold tracking-tight">
+              Vue d’ensemble
+            </h1>
+            <p className="mt-2 text-sm text-slate-500">
+              Retrouvez la situation réelle de vos loyers.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-3">
+            <Link
+              href="/biens"
+              className="rounded-lg bg-emerald-900 px-4 py-3 text-sm font-medium text-white hover:bg-emerald-800"
+            >
+              + Ajouter un bien
+            </Link>
+            <LogoutButton />
+          </div>
+        </header>
+
+        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {stats.map((stat) => (
+            <article
+              key={stat.label}
+              className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+            >
+              <p className="text-sm text-slate-500">{stat.label}</p>
+              <p
+                className={`mt-3 text-2xl font-bold ${
+                  stat.alert ? "text-red-600" : "text-slate-900"
+                }`}
+              >
+                {stat.value}
+              </p>
+              <p className="mt-2 text-xs text-slate-500">{stat.note}</p>
+            </article>
+          ))}
+        </section>
+
+        <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm md:p-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Suivi des impayés</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Situation calculée à partir des échéances et des paiements.
+              </p>
+            </div>
+
+            <Link
+              href="/impayes"
+              className="text-sm font-medium text-emerald-800 hover:underline"
+            >
+              Voir les impayés →
+            </Link>
+          </div>
+
+          <div className="mt-5 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-500">
+                  <th className="pb-3 pr-4 font-medium">Locataire</th>
+                  <th className="pb-3 pr-4 font-medium">Logement</th>
+                  <th className="pb-3 pr-4 font-medium">Retard</th>
+                  <th className="pb-3 text-right font-medium">Dette</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {lignesImpayes.map((ligne) => (
+                  <tr
+                    key={`${ligne.tenantId}-${ligne.logement}`}
+                    className="border-b border-slate-100"
+                  >
+                    <td className="py-4 pr-4 font-medium">
+                      {ligne.locataire}
+                    </td>
+                    <td className="py-4 pr-4">{ligne.logement}</td>
+                    <td className="py-4 pr-4">
+                      {ligne.periodes.size}{" "}
+                      {ligne.periodes.size > 1 ? "mois" : "mois"}
+                    </td>
+                    <td className="py-4 text-right font-semibold text-red-600">
+                      {euros(ligne.dette)}
+                    </td>
+                  </tr>
+                ))}
+
+                {lignesImpayes.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={4}
+                      className="py-8 text-center text-slate-500"
+                    >
+                      Aucun impayé à ce jour.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <p className="mt-6 text-center text-xs text-slate-400">
+          Localy · La gestion locative en toute sérénité.
+        </p>
       </main>
     </div>
   );
